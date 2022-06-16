@@ -61,18 +61,20 @@ fn retrieve_mac_address(network_interface: &NetworkInterface, target_ip_addr: Ip
         ethernet_packet.packet().to_owned()
     };
 
-    // todo: turn this if chain to an and_then chain
     let process_next_packet = |rx: &mut dyn DataLinkReceiver| -> Option<MacAddr> {
-        let incoming_packet = rx.next().ok()?;
-        let ethernet_packet = packet::ethernet::EthernetPacket::new(incoming_packet)?;
-        if ethernet_packet.get_ethertype() != EtherTypes::Arp {
-            return None;
-        }
-        let arp_packet = packet::arp::ArpPacket::new(ethernet_packet.payload())?;
-        if arp_packet.get_operation() == ArpOperations::Reply && arp_packet.get_sender_proto_addr() == target_ip_addr {
-            return Some(arp_packet.get_sender_hw_addr());
-        }
-        return None;
+        rx.next().ok().and_then(|incoming_packet| {
+            packet::ethernet::EthernetPacket::owned(incoming_packet.to_owned())
+        }).and_then(|ethernet_packet| {
+            if ethernet_packet.get_ethertype() != EtherTypes::Arp {
+                return None;
+            }
+            packet::arp::ArpPacket::owned(ethernet_packet.payload().to_owned())
+        }).and_then(|arp_packet| {
+            if arp_packet.get_operation() == ArpOperations::Reply && arp_packet.get_sender_proto_addr() == target_ip_addr {
+                return Some(arp_packet.get_sender_hw_addr());
+            }
+            None
+        })
     };
 
     // send an arp request packet, wait 5 sec for the response, if its unanswered send another arp request. Repeat this for a total of 10 arp request.
