@@ -30,5 +30,5 @@ the gateway sends an arp request for the victim\
 \
 We have to answer it, and we arp reply to both with our mac address.
 
-License
+## License
 See [LICENSE](https://github.com/EdoardoLuciani/ArpSpoof/blob/main/LICENSE)
